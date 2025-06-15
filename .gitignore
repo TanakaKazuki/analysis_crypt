@@ -1,0 +1,26 @@
+# データリソース（個人情報保護のため）
+resource/
+
+# Python関連
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.env
+.python-version
+
+# ログファイル
+logs/
+*.log
+
+# キャッシュ
+.streamlit/
+
+# OSファイル
+.DS_Store
+Thumbs.db
+
+# checkpointデータ
+src/checkpoints/*.json 
