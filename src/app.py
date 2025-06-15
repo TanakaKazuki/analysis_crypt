@@ -8,6 +8,11 @@ import altair as alt
 from datetime import datetime
 import os
 import sys
+from plotly.subplots import make_subplots
+from decimal import Decimal, ROUND_HALF_UP
+import re
+import json
+from pathlib import Path
 
 # カレントディレクトリをsrcの親ディレクトリに設定
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,7 +22,7 @@ from src.data_loader import DataLoader
 from src.analyzer import CryptoAnalyzer
 
 # ページ設定
-st.set_page_config(page_title="仮想通貨取引分析ツール", page_icon="💰", layout="wide")
+st.set_page_config(page_title="クリプト取引分析ツール", page_icon="��", layout="wide")
 
 # セッション状態の初期化
 if 'data_loader' not in st.session_state:
@@ -30,22 +35,43 @@ def get_analyzer(_data_loader):
 if 'analyzer' not in st.session_state:
     st.session_state.analyzer = get_analyzer(st.session_state.data_loader)
 
+# 最新のチェックポイントから価格を読み込む
+def get_latest_prices():
+    default_prices = {
+        'BTC': 0.0,
+        'ETH': 0.0,
+        'SOL': 0.0,
+        'XRP': 0.0,
+        'DOGE': 0.0,
+        'XLM': 0.0
+    }
+    
+    checkpoints = st.session_state.data_loader.load_checkpoints()
+    if checkpoints:
+        latest_checkpoint = checkpoints[-1]
+        return latest_checkpoint['prices']
+    return default_prices
+
 # サイドバーの設定
 st.sidebar.title("設定")
 
 # 年の選択
 years = st.session_state.data_loader.get_years()
-selected_year = st.sidebar.selectbox("分析する年を選択", years, index=years.index('all'))
+selected_year = st.sidebar.selectbox("分析する年を選択", years, index=years.index('all') if 'all' in years else 0)
 
 # コインの選択
 coins = st.session_state.data_loader.get_coins()
+
+# 最新の価格を取得
+latest_prices = get_latest_prices()
 
 # 現在の価格入力フォーム
 st.sidebar.subheader("現在の価格を入力")
 current_prices = {}
 
 for coin in coins:
-    default_value = 0.0
+    # 最新の価格があればそれを初期値とする
+    default_value = latest_prices.get(coin, 0.0)
     current_prices[coin] = st.sidebar.number_input(f"{coin}の価格", min_value=0.0, value=default_value, format="%.2f")
 
 # チェックポイント記録ボタン
@@ -58,7 +84,7 @@ if st.sidebar.button("チェックポイント記録"):
     st.sidebar.success(f"チェックポイントを記録しました: {timestamp}")
 
 # メインコンテンツ
-st.title("仮想通貨取引分析ツール")
+st.title("クリプト取引分析ツール")
 
 # タブの設定
 tab1, tab2, tab3, tab4 = st.tabs(["取引サマリー", "年間確定利益", "価格・資産推移", "取得単価シミュレーション"])
@@ -143,7 +169,7 @@ with tab2:
     st.header("年間確定利益")
     
     # 確定利益の計算
-    yearly_profits = st.session_state.analyzer.calculate_yearly_profit()
+    yearly_profits, yearly_coin_profits = st.session_state.analyzer.calculate_yearly_profit()
     
     if yearly_profits:
         # データフレームに変換
@@ -158,14 +184,98 @@ with tab2:
         profit_df = pd.DataFrame(profit_data)
         st.dataframe(profit_df, use_container_width=True)
         
-        # グラフ表示
-        fig = px.bar(
-            profit_df,
-            x="年",
-            y="確定利益 (円)",
-            title="年間確定利益の推移"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        # 積み上げバーチャート用のデータ準備
+        stacked_data = []
+        all_coins = set()
+        
+        for year, coin_profits in yearly_coin_profits.items():
+            for coin, profit in coin_profits.items():
+                all_coins.add(coin)
+                stacked_data.append({
+                    "年": year,
+                    "コイン": coin,
+                    "確定利益 (円)": profit
+                })
+        
+        if stacked_data:
+            # データフレームに変換
+            stacked_df = pd.DataFrame(stacked_data)
+            
+            # 積み上げバーチャート表示
+            fig = px.bar(
+                stacked_df,
+                x="年",
+                y="確定利益 (円)",
+                color="コイン",
+                title="年間確定利益の推移（コイン別）",
+                barmode="relative"
+            )
+            
+            # X軸を年単位に設定
+            fig.update_xaxes(
+                tickmode='array',
+                tickvals=list(yearly_profits.keys()),
+                ticktext=[str(year) for year in yearly_profits.keys()]
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # 損益がマイナスの場合も適切に表示されることを説明
+            st.info("注: 確定損失（マイナスの値）がある場合は、バーが下方向に伸びて表示されます。")
+        
+        # コインごとの確定利益の内訳を表示
+        st.subheader("コインごとの確定利益内訳")
+        
+        # 年の選択
+        if yearly_coin_profits:
+            available_years = list(yearly_coin_profits.keys())
+            if available_years:
+                selected_profit_year = st.selectbox(
+                    "年を選択", 
+                    available_years, 
+                    format_func=lambda x: f"{x}年"
+                )
+                
+                # 選択した年のコインごとの利益を表示
+                if selected_profit_year in yearly_coin_profits:
+                    coin_profits = yearly_coin_profits[selected_profit_year]
+                    
+                    if coin_profits:
+                        coin_profit_data = []
+                        
+                        for coin, profit in coin_profits.items():
+                            coin_profit_data.append({
+                                "コイン": coin,
+                                "確定利益 (円)": round(profit),
+                                "計算方法": "売却価格 - 平均取得単価 × 売却数量"
+                            })
+                        
+                        # 合計行を追加
+                        total_profit = sum(profit for profit in coin_profits.values())
+                        coin_profit_data.append({
+                            "コイン": "合計",
+                            "確定利益 (円)": round(total_profit),
+                            "計算方法": "各コインの確定利益の合計"
+                        })
+                        
+                        # データフレームに変換
+                        coin_profit_df = pd.DataFrame(coin_profit_data)
+                        st.dataframe(coin_profit_df, use_container_width=True)
+                        
+                        # 円グラフで表示
+                        coin_profit_chart_data = [row for row in coin_profit_data if row["コイン"] != "合計"]
+                        
+                        if coin_profit_chart_data:
+                            fig = px.pie(
+                                pd.DataFrame(coin_profit_chart_data),
+                                values="確定利益 (円)",
+                                names="コイン",
+                                title=f"{selected_profit_year}年 コイン別確定利益内訳",
+                                hole=0.4
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info(f"{selected_profit_year}年のコインごとの確定利益データはありません。")
     else:
         st.info("確定利益のデータがありません。")
 
@@ -178,7 +288,7 @@ with tab3:
     
     if checkpoints:
         # コイン選択
-        selected_coin_for_chart = st.selectbox("コインを選択", ["全体"] + coins)
+        selected_coin_for_chart = st.selectbox("コインを選択", ["全体"] + coins, key="chart_coin_selector")
         
         # データ準備
         chart_data = []
@@ -214,6 +324,9 @@ with tab3:
         if chart_data:
             chart_df = pd.DataFrame(chart_data)
             
+            # データ確認用のデバッグ情報
+            st.write(f"データポイント数: {len(chart_df)}")
+            
             # 日時を日付型に変換
             chart_df["日時"] = pd.to_datetime(chart_df["日時"])
             
@@ -221,58 +334,179 @@ with tab3:
                 # 全体の資産推移
                 st.subheader("全体の資産推移")
                 
+                # 元本と評価額のみのグラフを作成（含み益は塗りつぶしで表現）
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=chart_df["日時"], y=chart_df["評価額"], name="評価額", line=dict(color="green")))
-                fig.add_trace(go.Scatter(x=chart_df["日時"], y=chart_df["元本"], name="元本", line=dict(color="blue")))
-                fig.add_trace(go.Scatter(x=chart_df["日時"], y=chart_df["含み益"], name="含み益", line=dict(color="red")))
                 
+                                # 元本のライン
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart_df["日時"], 
+                        y=chart_df["元本"], 
+                        name="元本", 
+                        line=dict(color="blue"),
+                        hoverinfo="skip"  # このトレースのホバー情報を表示しない
+                    )
+                )
+                
+                # 評価額のライン
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart_df["日時"], 
+                        y=chart_df["評価額"], 
+                        name="評価額", 
+                        line=dict(color="green"),
+                        fill='tonexty',  # 前のトレースとの間を塗りつぶし
+                        fillcolor='rgba(0, 255, 0, 0.1)',  # 薄い緑色で塗りつぶし
+                        hoverinfo="skip"  # このトレースのホバー情報を表示しない
+                    )
+                )
+                
+                # 統合されたホバー情報を持つ透明なトレース
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart_df["日時"],
+                        y=chart_df["評価額"],  # 評価額と同じY座標を使用
+                        name="情報",
+                        mode="lines",  # markersではなくlinesを使用
+                        line=dict(width=0),  # 線を非表示に
+                        hovertemplate='<b>%{x|%Y-%m-%d}</b><br>元本: %{customdata[0]:,.0f}円<br>評価額: %{customdata[1]:,.0f}円<br>含み益: %{customdata[2]:,.0f}円<extra></extra>',
+                        customdata=np.column_stack((chart_df["元本"], chart_df["評価額"], chart_df["含み益"])),
+                        showlegend=False
+                    )
+                )
+                
+                
+                # レイアウト設定
                 fig.update_layout(
                     title="全体の資産推移",
-                    xaxis_title="日時",
-                    yaxis_title="金額 (円)"
+                    xaxis_title="日付",
+                    yaxis_title="金額 (円)",
+                    xaxis=dict(
+                        type='date',
+                        tickformat='%Y-%m-%d'
+                    ),
+                    hovermode="x unified"  # X軸上の全ポイントを同時に表示
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 # コインごとの詳細
+                # データ確認用のデバッグ情報
+                st.write(f"選択コイン: {selected_coin_for_chart}")
+                st.write(f"価格データ: {chart_df['価格'].tolist()}")
+                st.write(f"保有枚数データ: {chart_df['保有枚数'].tolist()}")
+                
                 col1, col2 = st.columns(2)
                 
                 with col1:
                     st.subheader(f"{selected_coin_for_chart}の価格推移")
                     
-                    fig = px.line(
-                        chart_df,
-                        x="日時",
-                        y="価格",
-                        title=f"{selected_coin_for_chart}の価格推移"
+                    # データが1ポイントしかない場合はバーチャートで表示
+                    if len(chart_df) == 1:
+                        fig = px.bar(
+                            chart_df,
+                            x="日時",
+                            y="価格",
+                            title=f"{selected_coin_for_chart}の価格推移"
+                        )
+                    else:
+                        fig = px.line(
+                            chart_df,
+                            x="日時",
+                            y="価格",
+                            title=f"{selected_coin_for_chart}の価格推移"
+                        )
+                    # X軸を日付のみに設定
+                    fig.update_xaxes(
+                        type='date',
+                        tickformat='%Y-%m-%d'
                     )
                     st.plotly_chart(fig, use_container_width=True)
                 
                 with col2:
                     st.subheader(f"{selected_coin_for_chart}の保有枚数推移")
                     
-                    fig = px.line(
-                        chart_df,
-                        x="日時",
-                        y="保有枚数",
-                        title=f"{selected_coin_for_chart}の保有枚数推移"
+                    # データが1ポイントしかない場合はバーチャートで表示
+                    if len(chart_df) == 1:
+                        fig = px.bar(
+                            chart_df,
+                            x="日時",
+                            y="保有枚数",
+                            title=f"{selected_coin_for_chart}の保有枚数推移"
+                        )
+                    else:
+                        fig = px.line(
+                            chart_df,
+                            x="日時",
+                            y="保有枚数",
+                            title=f"{selected_coin_for_chart}の保有枚数推移"
+                        )
+                    # X軸を日付のみに設定
+                    fig.update_xaxes(
+                        type='date',
+                        tickformat='%Y-%m-%d'
                     )
                     st.plotly_chart(fig, use_container_width=True)
                 
                 st.subheader(f"{selected_coin_for_chart}の資産推移")
                 
+                # 元本と評価額のみのグラフを作成（含み益は塗りつぶしで表現）
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=chart_df["日時"], y=chart_df["評価額"], name="評価額", line=dict(color="green")))
-                fig.add_trace(go.Scatter(x=chart_df["日時"], y=chart_df["元本"], name="元本", line=dict(color="blue")))
-                fig.add_trace(go.Scatter(x=chart_df["日時"], y=chart_df["含み益"], name="含み益", line=dict(color="red")))
                 
+                                # 元本のライン
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart_df["日時"], 
+                        y=chart_df["元本"], 
+                        name="元本", 
+                        line=dict(color="blue"),
+                        hoverinfo="skip"  # このトレースのホバー情報を表示しない
+                    )
+                )
+                
+                # 評価額のライン
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart_df["日時"], 
+                        y=chart_df["評価額"], 
+                        name="評価額", 
+                        line=dict(color="green"),
+                        fill='tonexty',  # 前のトレースとの間を塗りつぶし
+                        fillcolor='rgba(0, 255, 0, 0.1)',  # 薄い緑色で塗りつぶし
+                        hoverinfo="skip"  # このトレースのホバー情報を表示しない
+                    )
+                )
+                
+                # 統合されたホバー情報を持つ透明なトレース
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart_df["日時"],
+                        y=chart_df["評価額"],  # 評価額と同じY座標を使用
+                        name="情報",
+                        mode="lines",  # markersではなくlinesを使用
+                        line=dict(width=0),  # 線を非表示に
+                        hovertemplate='<b>%{x|%Y-%m-%d}</b><br>元本: %{customdata[0]:,.0f}円<br>評価額: %{customdata[1]:,.0f}円<br>含み益: %{customdata[2]:,.0f}円<extra></extra>',
+                        customdata=np.column_stack((chart_df["元本"], chart_df["評価額"], chart_df["含み益"])),
+                        showlegend=False
+                    )
+                )
+                
+                
+                # レイアウト設定
                 fig.update_layout(
                     title=f"{selected_coin_for_chart}の資産推移",
-                    xaxis_title="日時",
-                    yaxis_title="金額 (円)"
+                    xaxis_title="日付",
+                    yaxis_title="金額 (円)",
+                    xaxis=dict(
+                        type='date',
+                        tickformat='%Y-%m-%d'
+                    ),
+                    hovermode="x unified"  # X軸上の全ポイントを同時に表示
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("表示するデータがありません。チェックポイントにデータが含まれていない可能性があります。")
     else:
         st.info("チェックポイントのデータがありません。「チェックポイント記録」ボタンを押して記録を開始してください。")
 
@@ -291,11 +525,11 @@ with tab4:
     
     with col1:
         st.subheader("追加購入シミュレーション")
-        additional_quantity = st.number_input("追加購入枚数", min_value=0.0, value=0.0, step=0.1)
+        additional_amount = st.number_input("追加購入金額（円）", min_value=0, value=0, step=1000)
         
-        if additional_quantity > 0:
-            # シミュレーション計算
-            scenario = st.session_state.analyzer.calculate_scenario(selected_coin_for_sim, current_price, additional_quantity)
+        if additional_amount > 0:
+            # シミュレーション計算（金額ベース）
+            scenario = st.session_state.analyzer.calculate_scenario_by_amount(selected_coin_for_sim, current_price, additional_amount)
             
             st.subheader("シミュレーション結果")
             
@@ -317,6 +551,9 @@ with tab4:
             with col2b:
                 st.metric("購入後の評価額", f"{round(scenario['new']['value']):,}円", 
                          delta=f"{round(scenario['change']['value']):,}円")
+                         
+            # 追加情報
+            st.info(f"{additional_amount:,}円で購入できる{selected_coin_for_sim}の数量: {scenario['change']['quantity']:.8f}")
     
     with col2:
         st.subheader("価格分布")
@@ -381,8 +618,11 @@ with tab4:
                 st.metric("現在の評価額", f"{round(distribution_data['current_value']):,}円")
                 
             # 追加購入のシミュレーションを表示（動的グラフ）
-            if additional_quantity > 0:
+            if additional_amount > 0:
                 st.subheader("追加購入シミュレーション")
+                
+                # 追加購入数量を計算
+                additional_quantity = scenario['change']['quantity']
                 
                 # 元のデータと新しいデータを結合
                 sim_data = distribution_data['distribution'].copy()
@@ -433,4 +673,4 @@ with tab4:
 
 # フッター
 st.markdown("---")
-st.caption("© 2023 仮想通貨取引分析ツール - プライバシー保護のためローカル環境で実行されます") 
+st.caption("© 2023 クリプト取引分析ツール - プライバシー保護のためローカル環境で実行されます") 
