@@ -12,6 +12,42 @@ class CryptoAnalyzer:
         self.current_prices = {}
         for coin in self.data_loader.get_coins():
             self.current_prices[coin] = 0
+    
+    def calculate_price_decrease_metrics(self, current_price, avg_price, quantity, price_decrease_percentage):
+        """価格下落率に基づく目標価格と関連指標を計算する"""
+        # 価格下落後の価格を計算
+        target_price = current_price * (1 - price_decrease_percentage)
+        
+        # 想定下落時の含み損益を計算
+        unrealized_profit_after_decrease = (target_price - avg_price) * quantity
+        unrealized_profit_rate_after_decrease = (target_price - avg_price) / avg_price * 100 if avg_price > 0 else 0
+        
+        return {
+            'target_price': target_price,
+            'unrealized_profit_after_decrease': unrealized_profit_after_decrease,
+            'unrealized_profit_rate_after_decrease': unrealized_profit_rate_after_decrease
+        }
+    
+    def calculate_roi_decrease_metrics(self, current_price, avg_price, quantity, roi_decrease_percentage):
+        """ROI減少率に基づく目標価格と関連指標を計算する"""
+        # 現在のROIを計算
+        current_roi = (current_price - avg_price) / avg_price if avg_price > 0 else 0
+        
+        # 新しいROIを計算
+        new_roi = current_roi * (1 - roi_decrease_percentage)
+        
+        # 目標価格を計算
+        target_price = avg_price * (1 + new_roi)
+        
+        # 想定下落時の含み損益を計算
+        unrealized_profit_after_decrease = (target_price - avg_price) * quantity
+        unrealized_profit_rate_after_decrease = (target_price - avg_price) / avg_price * 100 if avg_price > 0 else 0
+        
+        return {
+            'target_price': target_price,
+            'unrealized_profit_after_decrease': unrealized_profit_after_decrease,
+            'unrealized_profit_rate_after_decrease': unrealized_profit_rate_after_decrease
+        }
         
     def analyze_transactions(self, year, current_prices):
         """取引データを分析する"""

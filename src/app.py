@@ -56,6 +56,12 @@ st.sidebar.title("設定")
 years = st.session_state.data_loader.get_years()
 selected_year = st.sidebar.selectbox("分析する年を選択", years, index=years.index('all') if 'all' in years else 0)
 
+# ROI想定下落率の設定
+roi_decrease_percentage = st.sidebar.slider("ROI想定下落率 (%)", min_value=0, max_value=100, value=20) / 100
+
+# 価格下落率の設定
+price_decrease_percentage = st.sidebar.slider("価格下落率 (%)", min_value=0, max_value=100, value=20) / 100
+
 # コインの選択
 coins = st.session_state.data_loader.get_coins()
 
@@ -90,77 +96,114 @@ tab1, tab2, tab3, tab4 = st.tabs(["取引サマリー", "年間確定利益", "�
 analysis_results = st.session_state.analyzer.analyze_transactions(selected_year, current_prices)
 
 # タブ1: 取引サマリー
+# タブ1: 取引サマリー
 with tab1:
     st.header(f"{selected_year}年の取引サマリー")
     
     # 結果をデータフレームに変換
     summary_data = []
-    
+
     for coin, metrics in analysis_results.items():
+        # ROI減少後の指標を計算
+        roi_decrease_metrics = st.session_state.analyzer.calculate_roi_decrease_metrics(
+            current_prices[coin], 
+            metrics['avg_price'],
+            metrics['quantity'],
+            roi_decrease_percentage
+        )
+        
+        # 価格下落後の指標を計算
+        price_decrease_metrics = st.session_state.analyzer.calculate_price_decrease_metrics(
+            current_prices[coin], 
+            metrics['avg_price'],
+            metrics['quantity'],
+            price_decrease_percentage
+        )
+        
         summary_data.append({
             "コイン": coin,
             "元本 (円)": round(metrics['principal']),
             "取得コイン数": metrics['quantity'],
             "平均取得単価 (円)": round(metrics['avg_price']),
+            "現在価格 (円)": round(current_prices[coin]),
             "評価額 (円)": round(metrics['current_value']),
             "含み損益 (円)": round(metrics['unrealized_profit']),
             "含み損益率 (%)": round(metrics['unrealized_profit'] / metrics['principal'] * 100, 2) if metrics['principal'] > 0 else 0,
+            "想定下落時価格（ROI) (円)": round(roi_decrease_metrics['target_price']),
+            "下落時含み損益 （ROI）(円)": round(roi_decrease_metrics['unrealized_profit_after_decrease']),
+            "下落時含み損益率（ROI） (%)": round(roi_decrease_metrics['unrealized_profit_rate_after_decrease'], 2),
+            "想定下落時価格（価格) (円)": round(price_decrease_metrics['target_price']),
+            "下落時含み損益 （価格）(円)": round(price_decrease_metrics['unrealized_profit_after_decrease']),
+            "下落時含み損益率（価格） (%)": round(price_decrease_metrics['unrealized_profit_rate_after_decrease'], 2),
         })
-    
+
     # 全体の合計行を追加
     total_principal = sum(metrics['principal'] for metrics in analysis_results.values())
     total_current_value = sum(metrics['current_value'] for metrics in analysis_results.values())
     total_profit = total_current_value - total_principal
+
+    # 全体のROI減少後の含み損益を計算
+    total_target_value = 0
+    for coin, metrics in analysis_results.items():
+        roi_decrease_metrics = st.session_state.analyzer.calculate_roi_decrease_metrics(
+            current_prices[coin], 
+            metrics['avg_price'],
+            metrics['quantity'],
+            roi_decrease_percentage
+        )
+        total_target_value += roi_decrease_metrics['target_price'] * metrics['quantity']
+
+    total_profit_after_decrease = total_target_value - total_principal
+    total_profit_rate_after_decrease = total_profit_after_decrease / total_principal * 100 if total_principal > 0 else 0
     
+    # 全体の価格下落後の含み損益を計算
+    total_price_target_value = 0
+    for coin, metrics in analysis_results.items():
+        price_decrease_metrics = st.session_state.analyzer.calculate_price_decrease_metrics(
+            current_prices[coin], 
+            metrics['avg_price'],
+            metrics['quantity'],
+            price_decrease_percentage
+        )
+        total_price_target_value += price_decrease_metrics['target_price'] * metrics['quantity']
+
+    total_price_profit_after_decrease = total_price_target_value - total_principal
+    total_price_profit_rate_after_decrease = total_price_profit_after_decrease / total_principal * 100 if total_principal > 0 else 0
+
+
     summary_data.append({
         "コイン": "合計",
         "元本 (円)": round(total_principal),
         "取得コイン数": "-",
         "平均取得単価 (円)": "-",
+        "現在価格 (円)": "-",
         "評価額 (円)": round(total_current_value),
         "含み損益 (円)": round(total_profit),
         "含み損益率 (%)": round(total_profit / total_principal * 100, 2) if total_principal > 0 else 0,
+        "想定下落時価格（ROI) (円)": "-",
+        "下落時含み損益 （ROI）(円)": round(total_profit_after_decrease),
+        "下落時含み損益率（ROI） (%)": round(total_profit_rate_after_decrease, 2),
+        "想定下落時価格（価格) (円)": "-",
+        "下落時含み損益 （価格）(円)": round(total_price_profit_after_decrease),
+        "下落時含み損益率（価格） (%)": round(total_price_profit_rate_after_decrease, 2),
     })
-    
+
     # データフレームに変換して表示
     summary_df = pd.DataFrame(summary_data)
-    
+
     # 数値型のカラムを適切に処理
-    numeric_columns = ['元本 (円)', '取得コイン数', '平均取得単価 (円)', '評価額 (円)', '含み損益 (円)', '含み損益率 (%)']
+    numeric_columns = [
+        '元本 (円)', '取得コイン数', '平均取得単価 (円)', '現在価格 (円)', 
+        '想定下落時価格（ROI) (円)', '想定下落時価格（価格) (円)',
+        '評価額 (円)', '含み損益 (円)', '含み損益率 (%)', 
+        '下落時含み損益 （ROI）(円)', '下落時含み損益率（ROI） (%)',
+        '下落時含み損益 （価格）(円)', '下落時含み損益率（価格） (%)'
+    ]
     for col in numeric_columns:
         if col in summary_df.columns:
             summary_df[col] = pd.to_numeric(summary_df[col], errors='coerce')
     
-    st.dataframe(summary_df, use_container_width=True)
-    
-    # グラフ表示
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("コイン別元本内訳")
-        coin_data = summary_df[summary_df["コイン"] != "合計"].copy()
-        
-        fig = px.pie(
-            coin_data,
-            values="元本 (円)",
-            names="コイン",
-            title="コイン別元本内訳",
-            hole=0.4
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        st.subheader("コイン別評価額内訳")
-        
-        fig = px.pie(
-            coin_data,
-            values="評価額 (円)",
-            names="コイン",
-            title="コイン別評価額内訳",
-            hole=0.4
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
+    st.dataframe(summary_df, use_container_width=True)       
 # タブ2: 年間確定利益
 with tab2:
     st.header("年間確定利益")
