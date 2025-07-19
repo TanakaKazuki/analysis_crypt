@@ -37,14 +37,11 @@ if 'analyzer' not in st.session_state:
 
 # 最新のチェックポイントから価格を読み込む
 def get_latest_prices():
-    default_prices = {
-        'BTC': 0.0,
-        'ETH': 0.0,
-        'SOL': 0.0,
-        'XRP': 0.0,
-        'DOGE': 0.0,
-        'XLM': 0.0
-    }
+    # データローダーからコイン一覧を取得し、初期価格を0に設定
+    default_prices = {}
+    coins = st.session_state.data_loader.get_coins()
+    for coin in coins:
+        default_prices[coin] = 0.0
     
     checkpoints = st.session_state.data_loader.load_checkpoints()
     if checkpoints:

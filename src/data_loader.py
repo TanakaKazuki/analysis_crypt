@@ -134,7 +134,18 @@ class DataLoader:
         if os.path.exists(self.checkpoint_file):
             with open(self.checkpoint_file, 'r') as f:
                 try:
-                    return json.load(f)
+                    all_checkpoints = json.load(f)
+                    
+                    # 同一日のチェックポイントは最新のものだけを残す
+                    daily_checkpoints = {}
+                    for checkpoint in all_checkpoints:
+                        # タイムスタンプから日付部分のみ抽出（YYYY-MM-DD）
+                        date = checkpoint['timestamp'].split(' ')[0]
+                        # 同じ日付の場合は上書き（最新のデータが残る）
+                        daily_checkpoints[date] = checkpoint
+                    
+                    # 日付でソートして返す
+                    return [checkpoint for _, checkpoint in sorted(daily_checkpoints.items())]
                 except json.JSONDecodeError:
                     return []
         return [] 

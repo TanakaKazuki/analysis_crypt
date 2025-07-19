@@ -8,14 +8,10 @@ class CryptoAnalyzer:
     def __init__(self, data_loader):
         self.data_loader = data_loader
         self.transaction_data = None
-        self.current_prices = {
-            'BTC': 0,
-            'ETH': 0,
-            'SOL': 0,
-            'XRP': 0,
-            'DOGE': 0,
-            'XLM': 0
-        }
+        # データローダーからコイン一覧を取得し、初期価格を0に設定
+        self.current_prices = {}
+        for coin in self.data_loader.get_coins():
+            self.current_prices[coin] = 0
         
     def analyze_transactions(self, year, current_prices):
         """取引データを分析する"""
@@ -183,7 +179,16 @@ class CryptoAnalyzer:
         results = {}
         current_prices = self._get_current_prices()
         
-        for coin in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'XLM']:
+        # データから一意のコイン一覧を取得
+        if not data.empty and '銘柄名' in data.columns:
+            unique_coins = data['銘柄名'].unique()
+            # JPYを除外
+            coins = [coin for coin in unique_coins if coin != 'JPY']
+        else:
+            # データがない場合は現在の価格辞書からコイン一覧を取得
+            coins = list(current_prices.keys())
+        
+        for coin in coins:
             coin_data = data[data['銘柄名'] == coin].copy()
             if coin_data.empty:
                 continue
@@ -303,31 +308,117 @@ class CryptoAnalyzer:
         all_data = self.data_loader.filter_data_by_year('all')
         distribution_data = []
         
+        # 取引サマリーと同じ方法で平均取得単価を計算
+        total_quantity = 0
+        total_principal = 0
+        
         if not all_data.empty:
             coin_df = all_data[all_data['銘柄名'] == coin]
-            buy_transactions = coin_df[(coin_df['売買区分'] == '買')]
             
-            for _, row in buy_transactions.iterrows():
-                quantity = row.get('約定数量', 0)
-                rate = row.get('約定レート', 0)
+            # 取引データを日時順にソート
+            coin_df = coin_df.sort_values('日時')
+            
+            for _, row in coin_df.iterrows():
+                # ステーキング報酬の処理
+                if row['精算区分'] == '暗号資産預入・送付' and row['授受区分'] == '預入':
+                    if pd.notna(row['数量']) and row['数量'] > 0:
+                        total_quantity += float(row['数量'])
+                    # ステーキング報酬は元本に加算しない（0円で取得）
+                    continue
                 
-                if pd.notna(quantity) and pd.notna(rate) and quantity > 0 and rate > 0:
-                    distribution_data.append({
-                        'quantity': quantity,
-                        'price': rate
-                    })
-        
-        # 平均取得単価を計算
-        total_quantity = sum(item['quantity'] for item in distribution_data)
-        total_cost = sum(item['quantity'] * item['price'] for item in distribution_data)
-        avg_price = total_cost / total_quantity if total_quantity > 0 else 0
+                # ステーキング手数料の処理
+                if row['精算区分'] == '暗号資産預入・送付' and row['授受区分'] == '送付':
+                    if pd.notna(row['数量']) and row['数量'] > 0:
+                        total_quantity -= float(row['数量'])
+                    # ステーキング手数料は元本に影響しない
+                    continue
+                
+                # 取引所現物取引手数料返金の処理
+                if row['精算区分'] == '取引所現物 取引手数料返金':
+                    # 手数料返金は元本を減らす（コスト減少）
+                    if pd.notna(row['日本円受渡金額']) and row['日本円受渡金額'] > 0:
+                        total_principal -= float(row['日本円受渡金額'])
+                    continue
+                
+                # 販売所取引の処理
+                if '販売所取引' in str(row['精算区分']):
+                    # 販売所取引では日本円受渡金額から取得
+                    if pd.notna(row['日本円受渡金額']):
+                        amount = abs(float(row['日本円受渡金額']))
+                        
+                        if row['売買区分'] == '買':
+                            quantity = 0
+                            if pd.notna(row['約定数量']):
+                                quantity = float(row['約定数量'])
+                            elif pd.notna(row['数量']):
+                                quantity = float(row['数量'])
+                            else:
+                                # 数量が不明な場合はスキップ
+                                continue
+                                
+                            # 販売所取引では手数料が含まれているため、別途計算しない
+                            total_quantity += quantity
+                            total_principal += amount
+                            
+                            # 価格分布データに追加
+                            if quantity > 0:
+                                price = amount / quantity
+                                distribution_data.append({
+                                    'quantity': quantity,
+                                    'price': price
+                                })
+                    continue
+                
+                # 取引所現物取引の処理
+                if '取引所現物取引' in str(row['精算区分']):
+                    quantity = 0
+                    price = 0
+                    fee = 0
+                    
+                    if pd.notna(row['約定数量']):
+                        quantity = float(row['約定数量'])
+                    
+                    if pd.notna(row['約定レート']):
+                        price = float(row['約定レート'])
+                    
+                    if pd.notna(row['注文手数料']):
+                        fee = float(row['注文手数料'])
+                    
+                    if row['売買区分'] == '買':
+                        total_quantity += quantity
+                        total_principal += (quantity * price) + fee
+                        
+                        # 価格分布データに追加
+                        if quantity > 0 and price > 0:
+                            # 手数料を含めた実質的な価格を計算
+                            effective_price = ((quantity * price) + fee) / quantity
+                            distribution_data.append({
+                                'quantity': quantity,
+                                'price': effective_price
+                            })
+                    else:  # 売
+                        # 売却時の処理を修正
+                        sale_amount = quantity * price
+                        if pd.notna(row['日本円受渡金額']):
+                            sale_amount = float(row['日本円受渡金額'])
+                        
+                        # 元本の調整（売却分の元本を減らす）
+                        if total_quantity > 0:
+                            # 売却分の元本を減らす（平均取得単価で計算）
+                            avg_cost = total_principal / (total_quantity + quantity) if (total_quantity + quantity) > 0 else 0
+                            total_principal -= avg_cost * quantity
+                            total_quantity -= quantity
+            
+        # 平均取得単価を計算（取引サマリーと同じ方法）
+        avg_price = total_principal / total_quantity if total_quantity > 0 else 0
         
         return {
             'distribution': distribution_data,
             'avg_price': avg_price,
             'current_price': current_price,
             'total_quantity': total_quantity,
-            'current_value': total_quantity * current_price
+            'current_value': total_quantity * current_price,
+            'total_principal': total_principal
         }
         
     def calculate_scenario(self, coin, current_price, additional_quantity):
@@ -338,7 +429,8 @@ class CryptoAnalyzer:
         # 現在のデータ
         current_quantity = current_data['total_quantity']
         current_avg_price = current_data['avg_price']
-        current_total_cost = current_quantity * current_avg_price
+        # 元本を直接使用
+        current_total_cost = current_data['total_principal']
         
         # 追加購入後のデータ
         new_quantity = current_quantity + additional_quantity
@@ -375,7 +467,8 @@ class CryptoAnalyzer:
         # 現在のデータ
         current_quantity = current_data['total_quantity']
         current_avg_price = current_data['avg_price']
-        current_total_cost = current_quantity * current_avg_price
+        # 元本を直接使用
+        current_total_cost = current_data['total_principal']
         
         # 追加購入数量を計算（金額 ÷ 現在価格）
         additional_quantity = additional_amount / current_price if current_price > 0 else 0
